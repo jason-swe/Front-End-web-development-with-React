@@ -1,0 +1,26 @@
+/* Hiệu ứng underline cho navbar */
+.navbar-link {
+  position: relative;
+  color: inherit;
+  text-decoration: none;
+}
+
+.navbar-underline {
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 0%;
+  height: 3px;
+  background: #F7B6C2;
+  border-radius: 2px;
+  transition: width 0.3s cubic-bezier(.4,0,.2,1);
+  z-index: 2;
+}
+
+.navbar-link:hover .navbar-underline {
+  width: 100%;
+}
+
+.navbar-link-active .navbar-underline {
+  width: 100%;
+}
