@@ -3,45 +3,102 @@ import useDarkMode from './hooks/useDarkMode';
 import './App.css';
 import lightBg from './assets/lightmode_theme.png';
 import darkBg from './assets/darkmode_theme.png';
-import darkFlower from './assets/dark.png';
 import OrchidModal from './components/OrchidModal';
+import ProfileModal from './components/ProfileModal';
 import Orchids from './pages/Orchids';
-import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom';
+import OrchidCatalog from './components/OrchidCatalog';
+import OrchidQuickView from './components/OrchidQuickView';
+import { Navigate, Routes, Route, Link, useNavigate, useLocation, useParams } from 'react-router-dom';
 import OrchidDetail from './pages/OrchidDetail';
 import Contact from './pages/Contact';
 import { Navbar, Nav, Container } from 'react-bootstrap';
-import axios from 'axios';
 import About from './pages/About';
+import AdminCategories from './pages/AdminCategories';
+import AdminFeedback from './pages/AdminFeedback';
 import { auth, provider } from './firebase/firebase';
 import { signInWithPopup, signOut } from 'firebase/auth';
+import { onAuthStateChanged } from 'firebase/auth';
+import ListOfOrchids from './utils/ListOfOrchids';
+import apiClient from './services/apiClient';
+import { useDispatch, useSelector } from 'react-redux';
+import { addOrchid, removeOrchid, setOrchids, updateOrchid } from './store/orchidsSlice';
+import { clearAuthUser, setAuthUser } from './store/authSlice';
+import { getProfile, saveProfile as persistProfile } from './services/profileApi';
+import { getCategories } from './services/categoryApi';
+import { setCategories, setCategoriesError } from './store/categoriesSlice';
+
+function LegacyDetailRedirect() {
+  const { id } = useParams();
+  return <Navigate to={`/detail/${id}`} replace />;
+}
 
 function App() {
   const [darkMode, toggleDarkMode] = useDarkMode(false);
   const [activeNav, setActiveNav] = useState('Home');
   const location = useLocation();
-  const [orchids, setOrchids] = useState([]);
   const API_URL = import.meta.env.VITE_API_URL;
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [editOrchid, setEditOrchid] = useState(null);
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [search, setSearch] = useState('');
+  const [category, setCategory] = useState('all');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [quickViewOrchid, setQuickViewOrchid] = useState(null);
+  const dispatch = useDispatch();
+  const storedOrchids = useSelector((state) => state.orchids.items);
+  const storedCategories = useSelector((state) => state.categories.items);
 
   const theme = darkMode ? 'dark' : 'light';
   const bgImage = darkMode ? darkBg : lightBg;
 
-  // Fetch orchids from API
   useEffect(() => {
-    axios.get(API_URL)
-      .then(res => setOrchids(res.data))
-      .catch(err => console.error('Fetch orchids error:', err));
-  }, [API_URL]);
+    apiClient.get(API_URL)
+      .then(res => dispatch(setOrchids(res.data)))
+      .catch(err => {
+        console.error('Fetch orchids error:', err);
+        dispatch(setOrchids(ListOfOrchids));
+      });
+  }, [API_URL, dispatch]);
+
+  useEffect(() => {
+    getCategories()
+      .then((response) => dispatch(setCategories(response.data)))
+      .catch((error) => {
+        console.error('Fetch categories error:', error);
+        dispatch(setCategoriesError('Unable to load categories.'));
+      });
+  }, [dispatch]);
+
+  useEffect(() => onAuthStateChanged(auth, (nextUser) => {
+    if (!nextUser) {
+      setUser(null);
+      setIsAdmin(false);
+      return;
+    }
+    const savedProfile = getProfile(nextUser.uid) || {};
+    const signedInUser = { ...nextUser, ...savedProfile };
+    setUser(signedInUser);
+    const adminEmails = (import.meta.env.VITE_ADMIN_EMAIL || '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
+    const admin = adminEmails.includes(nextUser.email?.toLowerCase());
+    setIsAdmin(admin);
+    dispatch(setAuthUser({ user: signedInUser, isAdmin: admin }));
+  }), [dispatch]);
+
+  const categories = [...new Set([...storedCategories.map((item) => item.name), ...storedOrchids.map((orchid) => orchid.category)].filter(Boolean))].sort();
+  const visibleOrchids = storedOrchids.filter((orchid) => (
+    orchid.name.toLowerCase().includes(search.toLowerCase().trim())
+    && (category === 'all' || orchid.category === category)
+  ));
 
   React.useEffect(() => {
-    // Cập nhật activeNav dựa trên pathname
     if (location.pathname === '/contact') setActiveNav('Contact');
+    else if (location.pathname.startsWith('/admin/categories')) setActiveNav('Categories');
+    else if (location.pathname.startsWith('/admin/feedback')) setActiveNav('Feedback');
     else if (location.pathname === '/') setActiveNav('Home');
-    // Có thể mở rộng cho các mục khác nếu cần
+    else setActiveNav('');
   }, [location.pathname]);
 
   // Scroll lên đầu trang mỗi khi chuyển route
@@ -52,16 +109,11 @@ function App() {
   // Thêm hàm thêm mới orchid
   const handleAddOrchid = async (data) => {
     try {
-      await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
+      const response = await apiClient.post(API_URL, data);
       setShowAddModal(false);
-      // Reload lại danh sách
-      axios.get(API_URL)
-        .then(res => setOrchids(res.data));
+      dispatch(addOrchid(response.data));
     } catch (err) {
+      console.error('Add orchid error:', err);
       alert('Add failed!');
     }
   };
@@ -73,12 +125,12 @@ function App() {
   };
   const handleSaveEditOrchid = async (data) => {
     try {
-      await axios.put(`${API_URL}/${data.id}`, data);
+      const response = await apiClient.put(`${API_URL}/${data.id}`, data);
       setShowEditModal(false);
       setEditOrchid(null);
-      axios.get(API_URL)
-        .then(res => setOrchids(res.data));
+      dispatch(updateOrchid(response.data));
     } catch (err) {
+      console.error('Edit orchid error:', err);
       alert('Edit failed!');
     }
   };
@@ -86,10 +138,10 @@ function App() {
   const handleDeleteOrchid = async (orchid) => {
     if (!window.confirm('Are you sure you want to delete this orchid?')) return;
     try {
-      await fetch(`${API_URL}/${orchid.id}`, { method: 'DELETE' });
-      axios.get(API_URL)
-        .then(res => setOrchids(res.data));
+      await apiClient.delete(`${API_URL}/${orchid.id}`);
+      dispatch(removeOrchid(orchid.id));
     } catch (err) {
+      console.error('Delete orchid error:', err);
       alert('Delete failed!');
     }
   };
@@ -97,16 +149,34 @@ function App() {
   const handleGoogleLogin = async () => {
     try {
       provider.setCustomParameters({ prompt: 'select_account' });
-      const result = await signInWithPopup(auth, provider);
-      setUser(result.user);
+      await signInWithPopup(auth, provider);
     } catch (err) {
+      console.error('Google login error:', err);
       alert('Login failed!');
     }
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
-    setUser(null);
+    try {
+      await signOut(auth);
+      dispatch(clearAuthUser());
+    } catch (err) {
+      console.error('Logout error:', err);
+      alert('Logout failed!');
+    }
+  };
+
+  const saveProfile = async (profile) => {
+    const updatedUser = { ...user, ...profile };
+    try {
+      await persistProfile(user.uid, { ...profile, email: user.email });
+      setUser(updatedUser);
+      dispatch(setAuthUser({ user: updatedUser, isAdmin }));
+      setShowProfileModal(false);
+    } catch (error) {
+      console.error('Save profile error:', error);
+      window.alert('Profile could not be saved.');
+    }
   };
 
   return (
@@ -127,6 +197,8 @@ function App() {
               <Nav.Link as={Link} to="#" active={activeNav === 'Blog'} onClick={() => setActiveNav('Blog')} style={{ color: activeNav === 'Blog' ? '#F7B6C2' : undefined, fontWeight: 400 }}>Blog</Nav.Link>
               <Nav.Link as={Link} to="#" active={activeNav === 'Pages'} onClick={() => setActiveNav('Pages')} style={{ color: activeNav === 'Pages' ? '#F7B6C2' : undefined, fontWeight: 400 }}>Pages</Nav.Link>
               <Nav.Link as={Link} to="/contact" active={activeNav === 'Contact'} onClick={() => setActiveNav('Contact')} style={{ color: activeNav === 'Contact' ? '#F7B6C2' : undefined, fontWeight: 400 }}>Contact</Nav.Link>
+              {isAdmin && <Nav.Link as={Link} to="/admin/categories" active={activeNav === 'Categories'} style={{ color: activeNav === 'Categories' ? '#F7B6C2' : undefined }}>Categories</Nav.Link>}
+              {isAdmin && <Nav.Link as={Link} to="/admin/feedback" active={activeNav === 'Feedback'} style={{ color: activeNav === 'Feedback' ? '#F7B6C2' : undefined }}>Feedback</Nav.Link>}
             </Nav>
             <div style={{ display: 'flex', gap: 24, alignItems: 'center', marginLeft: 24 }}>
               <button onClick={toggleDarkMode} style={{
@@ -145,7 +217,8 @@ function App() {
                 {user ? (
                   <>
                     <img src={user.photoURL} alt="avatar" style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', border: '2px solid #F7B6C2' }} />
-                    <span style={{ fontWeight: 600, color: darkMode ? '#F7B6C2' : '#C9A4D8', fontSize: 16 }}>{user.displayName}</span>
+                    <button onClick={() => setShowProfileModal(true)} style={{ background: 'none', border: 0, color: darkMode ? '#F7B6C2' : '#C9A4D8', fontWeight: 600 }}>{user.displayName || user.email}</button>
+                    {isAdmin && <span style={{ color: '#4CAF50', fontWeight: 700 }}>Admin</span>}
                     <button onClick={handleLogout} style={{ background: '#F7B6C2', color: '#222', border: 'none', borderRadius: 8, padding: '4px 18px', fontWeight: 700, fontSize: 15, cursor: 'pointer', marginLeft: 4 }}>Logout</button>
                   </>
                 ) : (
@@ -158,7 +231,7 @@ function App() {
       </Navbar>
 
       {/* Landing Page và About Section chỉ hiện khi không phải trang details, contact hoặc about */}
-      {!(location.pathname.startsWith('/orchid/') || location.pathname === '/contact' || location.pathname === '/about') && (
+      {!(location.pathname.startsWith('/orchid/') || location.pathname.startsWith('/detail/') || location.pathname === '/contact' || location.pathname === '/about') && (
         <>
           <div className={`landing-page ${theme}`} style={{
             minHeight: '100vh',
@@ -297,11 +370,18 @@ function App() {
             }}>
               Discover the exquisite beauty of our handpicked orchid varieties, each cultivated with care to bring nature's elegance into your home. From rare species to timeless classics, find the perfect bloom to inspire your space            </p>
             <div style={{ width: '90%', maxWidth: 1200, display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-              <div style={{ display: 'flex', gap: 12 }}>
+              <div className="catalog-toolbar">
+                <OrchidCatalog
+                  categories={categories}
+                  search={search}
+                  category={category}
+                  onSearchChange={setSearch}
+                  onCategoryChange={setCategory}
+                />
                 <Link to="/special" style={{ textDecoration: 'none' }}>
                   <button className="btn" style={{ fontWeight: 600, border: '2px solid #F7B6C2', color: '#F7B6C2', background: 'transparent' }}>Special</button>
                 </Link>
-                <Link to="/naturals" style={{ textDecoration: 'none' }}>
+                <Link to="/natural" style={{ textDecoration: 'none' }}>
                   <button className="btn" style={{ fontWeight: 600, border: '2px solid #F7B6C2', color: '#F7B6C2', background: 'transparent' }}>Naturals</button>
                 </Link>
               </div>
@@ -312,7 +392,7 @@ function App() {
                 // Nếu chưa đăng nhập (user == null) thì KHÔNG hiển thị nút Add Orchid
                 // Nếu đã đăng nhập (user != null) thì HIỆN nút Add Orchid
               
-              user && (
+              isAdmin && (
                 <div>
                   <button className="btn" style={{ fontWeight: 600, border: '2px solid #4CAF50', color: '#4CAF50', background: 'transparent', marginLeft: 16 }} onClick={() => setShowAddModal(true)}>
                     + Add Orchid
@@ -326,49 +406,23 @@ function App() {
               // => Chỉ user đăng nhập mới có quyền CRUD */}
 
             </div>
-            <Orchids 
-              orchids={orchids} 
-              darkMode={darkMode} 
-              onDetails={orchid => {
-                const nav = document.createElement('a');
-                nav.href = `/orchid/${orchids.indexOf(orchid)}`;
-                nav.click();
-              }}
-              {...(user ? { onEdit: handleEditOrchid, onDelete: handleDeleteOrchid } : {})}
+            <Orchids
+              orchids={visibleOrchids}
+              darkMode={darkMode}
+              onDetails={(orchid) => navigate(`/detail/${orchid.id}`)}
+              onQuickView={setQuickViewOrchid}
+              {...(isAdmin ? { onEdit: handleEditOrchid, onDelete: handleDeleteOrchid } : {})}
             />
-
               {/* / Chỉ hiển thị modal Add/Edit khi đã đăng nhập (user != null)
               // Nếu user == null: KHÔNG render OrchidModal (Add/Edit)
               // Nếu user != null: render OrchidModal để thao tác CRUD
               //  */}
               
-            {user && <OrchidModal open={showAddModal} onClose={() => setShowAddModal(false)} darkMode={darkMode} onSave={handleAddOrchid} />}
-            {user && <OrchidModal open={showEditModal} onClose={() => { setShowEditModal(false); setEditOrchid(null); }} darkMode={darkMode} orchid={editOrchid} onSave={handleSaveEditOrchid} />}
+            {isAdmin && <OrchidModal open={showAddModal} onClose={() => setShowAddModal(false)} darkMode={darkMode} onSave={handleAddOrchid} />}
+            {isAdmin && <OrchidModal open={showEditModal} onClose={() => { setShowEditModal(false); setEditOrchid(null); }} darkMode={darkMode} orchid={editOrchid} onSave={handleSaveEditOrchid} />}
           </section>
         } />
-        <Route path="/naturals" element={
-          <section style={{
-            width: '100%',
-            background: darkMode ? 'linear-gradient(135deg, #1a1122 60%, #2a183a 100%)' : 'linear-gradient(135deg, #fff 60%, #f8e8e8 100%)',
-            padding: '60px 0 80px 0',
-            boxSizing: 'border-box',
-            minHeight: 600,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-          }}>
-            <h2 style={{ fontSize: 44, fontWeight: 800, color: darkMode ? '#fff' : '#222', marginBottom: 8 }}>Natural Orchids</h2>
-            <Orchids 
-              orchids={orchids.filter(o => o.isNatural)} 
-              darkMode={darkMode} 
-              onDetails={orchid => {
-                const nav = document.createElement('a');
-                nav.href = `/orchid/${orchids.indexOf(orchid)}`;
-                nav.click();
-              }}
-            />
-          </section>
-        } />
+        <Route path="/naturals" element={<Navigate to="/natural" replace />} />
         <Route path="/special" element={
           <section style={{
             width: '100%',
@@ -382,20 +436,24 @@ function App() {
           }}>
             <h2 style={{ fontSize: 44, fontWeight: 800, color: darkMode ? '#fff' : '#222', marginBottom: 8 }}>Special Orchids</h2>
             <Orchids 
-              orchids={orchids.filter(o => o.isSpecial)} 
+              orchids={storedOrchids.filter(o => o.isSpecial)} 
               darkMode={darkMode} 
               onDetails={orchid => {
-                const nav = document.createElement('a');
-                nav.href = `/orchid/${orchids.indexOf(orchid)}`;
-                nav.click();
+                navigate(`/orchid/${orchid.id}`);
               }}
             />
           </section>
         } />
-        <Route path="/orchid/:id" element={<OrchidDetail darkMode={darkMode} />} />
+        <Route path="/orchid/:id" element={<LegacyDetailRedirect />} />
+        <Route path="/detail/:id" element={<OrchidDetail darkMode={darkMode} user={user} />} />
+        <Route path="/natural" element={<section><h2 className="page-title">Natural Orchids</h2><Orchids orchids={storedOrchids.filter((item) => item.isNatural)} darkMode={darkMode} onDetails={(orchid) => navigate(`/detail/${orchid.id}`)} /></section>} />
         <Route path="/contact" element={<Contact darkMode={darkMode} />} />
         <Route path="/about" element={<About darkMode={darkMode} />} />
+        <Route path="/admin/categories" element={<AdminCategories darkMode={darkMode} isAdmin={isAdmin} />} />
+        <Route path="/admin/feedback" element={<AdminFeedback darkMode={darkMode} isAdmin={isAdmin} />} />
       </Routes>
+      <ProfileModal open={showProfileModal} onClose={() => setShowProfileModal(false)} user={user} darkMode={darkMode} onSave={saveProfile} />
+      <OrchidQuickView orchid={quickViewOrchid} open={Boolean(quickViewOrchid)} onClose={() => setQuickViewOrchid(null)} darkMode={darkMode} />
 
       {/* Footer Section */}
       <footer style={{
@@ -495,7 +553,7 @@ function App() {
           fontSize: 16,
           flexWrap: 'wrap',
         }}>
-          <div>Copyright ©2025 FER202. All Rights Reserved.</div>
+          <div>Copyright ©2026 FER202. All Rights Reserved.</div>
           <div style={{ display: 'flex', gap: 24 }}>
             <a href="#" style={{ color: '#ccc', textDecoration: 'none', fontSize: 16 }}>Terms & Conditions</a>
             <a href="#" style={{ color: '#ccc', textDecoration: 'none', fontSize: 16 }}>Privacy Policy</a>
